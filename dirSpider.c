@@ -49,6 +49,7 @@
 
 #include "c_list.h"
 #include <stdlib.h>
+#include <cspider/spider.h>
 
 #define MAX_NAMELEN 255
 
@@ -78,100 +79,12 @@ static void *xmp_init(struct fuse_conn_info *conn,
 	(void) conn;
 	cfg->use_ino = 1;
 
-	/* Pick up changes from lower filesystem right away. This is
-	   also necessary for better hardlink support. When the kernel
-	   calls the unlink() handler, it does not know the inode of
-	   the to-be-removed entry and can therefore not invalidate
-	   the cache of the associated inode - resulting in an
-	   incorrect st_nlink value being reported for any remaining
-	   hardlinks to this inode. */
-	cfg->entry_timeout = 0;
-	cfg->attr_timeout = 0;
-	cfg->negative_timeout = 0;
-
 	return NULL;
-}
-
-static int get_f_inode(const char *path, struct f_inode *out) {
-	char *buf = (char *)malloc((strlen(path)+1)*sizeof(char));
-	strcpy(buf, path);
-	char delim[3] = "/ ";
-	char *p, *next;
-	p = strtok(buf, delim);
-
-	struct d_inode *cur_node = rootDir;
-	struct list_node* n;
-	while((next = strtok(NULL, delim))) {
-		int exist = 0;
-		list_for_each (n, &cur_node->dir_entries) {
-			struct d_inode* o = list_entry(n, struct d_inode, node);
-			if(strcmp(o->name, p) == 0) {
-				cur_node = o;
-				exist = 1;
-				break;
-			}
-		}
-		if(exist == 0)
-			return -ENOENT;
-		p = next;
-	}
-	list_for_each (n, &cur_node->file_entries) {
-		struct f_inode* o = list_entry(n, struct f_inode, node);
-		if(strcmp(o->name, p) == 0) {
-			*out = *o;
-			return 0;
-		}
-	}
-	return -ENOENT;
-}
-
-static int get_d_inode(const char *path, struct d_inode *out) {
-	char *buf = (char *)malloc((strlen(path)+1)*sizeof(char));
-	strcpy(buf, path);
-	char delim[3] = "/ ";
-	char *p, *next;
-	p = strtok(buf, delim);
-
-	struct d_inode *cur_node = rootDir;
-	struct list_node* n;
-	while((next = strtok(NULL, delim))) {
-		int exist = 0;
-		list_for_each (n, &cur_node->dir_entries) {
-			struct d_inode* o = list_entry(n, struct d_inode, node);
-			if(strcmp(o->name, p) == 0) {
-				cur_node = o;
-				exist = 1;
-				break;
-			}
-		}
-		if(exist == 0)
-			return -ENOENT;
-		p = next;
-	}
-	list_for_each (n, &cur_node->dir_entries) {
-		struct d_inode* o = list_entry(n, struct d_inode, node);
-		if(strcmp(o->name, p) == 0) {
-			*out = *o;
-			return 0;
-		}
-	}
-	return -ENOENT;
 }
 
 static int xmp_getattr(const char *path, struct stat *st,
 		       struct fuse_file_info *fi)
 {
-	/*
-	(void) fi;
-	int res;
-
-	res = lstat(path, stbuf);
-	if (res == -1)
-		return -errno;
-
-	return 0;
-	*/
-	struct d_inode *d_o = (struct d_inode *)malloc(sizeof(struct d_inode));
 	memset(st, 0, sizeof(struct stat));
 
 	if (strcmp(path, "/") == 0) {
@@ -190,93 +103,72 @@ static int xmp_getattr(const char *path, struct stat *st,
 			st->st_size += strlen(o->name);
 		}
 		return 0;
-
-	} else if(get_d_inode(path, d_o) == 0) {
-
-		st->st_mode = 0755 | S_IFDIR;
-		st->st_nlink = 2;
-		st->st_size = 0;
-
-		list_init(&d_o->file_entries);
-		list_init(&d_o->dir_entries);
-		struct list_node* n;
-		list_for_each (n, &d_o->file_entries) {
-			struct f_inode* o = list_entry(n, struct f_inode, node);
-			++st->st_nlink;
-			st->st_size += strlen(o->name);
-		}
-		list_for_each (n, &d_o->dir_entries) {
-			struct d_inode* o = list_entry(n, struct d_inode, node);
-			++st->st_nlink;
-			st->st_size += strlen(o->name);
-		}
-
-		return 0;
-	} else {
-		struct f_inode *f_o = (struct f_inode *)malloc(sizeof(struct f_inode));
-		if(get_f_inode(path, f_o))
-			return -ENOENT;
-		st->st_mode = 0644 | S_IFREG;
-		st->st_nlink = 1;
-		st->st_size = f_o->size;
-		return 0;
 	}
 
-	return -ENOENT;
+	char *buf = (char *)malloc((strlen(path)+1)*sizeof(char));
+	strcpy(buf, path);
+	char delim[2] = "/ ";
+	char *p, *next;
+	p = strtok(buf, delim);
+
+	struct d_inode *cur_node = rootDir;
+	struct list_node* n;
+	while((next = strtok(NULL, delim))) {
+		int exist = 0;
+		list_for_each (n, &cur_node->dir_entries) {
+			struct d_inode* o = list_entry(n, struct d_inode, node);
+			if(strcmp(o->name, p) == 0) {
+				cur_node = o;
+				exist = 1;
+				break;
+			}
+		}
+		if(exist == 0) {
+			free(buf);
+			return -ENOENT;
+		}
+		p = next;
+	}
+
+	list_for_each (n, &cur_node->dir_entries) {
+		struct d_inode* d_o = list_entry(n, struct d_inode, node);
+		if(strcmp(d_o->name, p) == 0) {
+			st->st_mode = d_o->mode;
+			st->st_nlink = 2;
+			st->st_size = 0;
+			list_for_each (n, &d_o->file_entries) {
+				struct f_inode* o = list_entry(n, struct f_inode, node);
+				++st->st_nlink;
+				st->st_size += strlen(o->name);
+			}
+			list_for_each (n, &d_o->dir_entries) {
+				struct d_inode* o = list_entry(n, struct d_inode, node);
+				++st->st_nlink;
+				st->st_size += strlen(o->name);
+			}
+			free(buf);
+			return 0;
+		}
+	}
+
+	list_for_each (n, &cur_node->file_entries) {
+		struct f_inode* f_o = list_entry(n, struct f_inode, node);
+		if(strcmp(f_o->name, p) == 0) {
+			st->st_mode = f_o->mode;
+			st->st_nlink = 1;
+			st->st_size = f_o->size;
+			free(buf);
+			return 0;
+		}
+	}
+	free(buf);
+	return -ENOENT;   //输入输出错误
 }
-
-static int xmp_access(const char *path, int mask)
-{
-	int res;
-
-	res = access(path, mask);
-	if (res == -1)
-		return -errno;
-
-	return 0;
-}
-
-static int xmp_readlink(const char *path, char *buf, size_t size)
-{
-	int res;
-
-	res = readlink(path, buf, size - 1);
-	if (res == -1)
-		return -errno;
-
-	buf[res] = '\0';
-	return 0;
-}
-
 
 static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		       off_t offset, struct fuse_file_info *fi,
 		       enum fuse_readdir_flags flags)
 {
-	/*
-	DIR *dp;
-	struct dirent *de;
-
-	(void) offset;
-	(void) fi;
-	(void) flags;
-
-	dp = opendir(path);
-	if (dp == NULL)
-		return -errno;
-
-	while ((de = readdir(dp)) != NULL) {
-		struct stat st;
-		memset(&st, 0, sizeof(st));
-		st.st_ino = de->d_ino;
-		st.st_mode = de->d_type << 12;
-		if (filler(buf, de->d_name, &st, 0, 0))
-			break;
-	}
-
-	closedir(dp);
-	return 0;
-    */
 	struct list_node* n;
 
 	filler(buf, ".", NULL, 0, 0);
@@ -293,80 +185,220 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		}
 		return 0;
 	}
-	/*
-	struct d_inode *d_o = (struct d_inode *)malloc(sizeof(struct d_inode));;
-	if(get_d_inode(path, d_o))
-		return -ENOENT;
-	list_for_each (n, &d_o->file_entries) {
+
+	char *mpath = (char *)malloc((strlen(path)+1)*sizeof(char));
+	strcpy(mpath, path);
+	char delim[2] = "/";
+	char *p;
+	p = strtok(mpath, delim);
+	struct d_inode *cur_node = rootDir;
+	while(p) {
+		int exist = 0;
+		list_for_each (n, &cur_node->dir_entries) {
+			struct d_inode* o = list_entry(n, struct d_inode, node);
+			if(strcmp(o->name, p) == 0) {
+				cur_node = o;
+				exist = 1;
+				break;
+			}
+		}
+		if(exist == 0) {
+			free(mpath);
+			return -ENOENT;
+		}
+		p = strtok(NULL, delim);
+	}
+
+	list_for_each (n, &cur_node->file_entries) {
 		struct f_inode* o = list_entry(n, struct f_inode, node);
 		filler(buf, o->name, NULL, 0, 0);
 	}
-	list_for_each (n, &d_o->dir_entries) {
+	list_for_each (n, &cur_node->dir_entries) {
 		struct d_inode* o = list_entry(n, struct d_inode, node);
 		filler(buf, o->name, NULL, 0, 0);
 	}
-*/
+	free(mpath);
+
 	return 0;
+}
+
+#define SPIDER_LENGTH 100
+static char *spider_title[SPIDER_LENGTH];
+static char *spider_url[SPIDER_LENGTH];
+static int spider_title_size = 0;
+static int spider_url_size = 0;
+
+static char *join_with_base(char *wd, char* pn) {
+	char *url_base = "http://www.baidu.com/s";
+	char *result = malloc((
+			strlen(url_base) +
+			strlen("?wd=") +
+			strlen(wd) +
+			strlen("&pn=") +
+			strlen(pn) + 1)*sizeof(char));
+	strcpy(result, url_base);
+	strcat(result, "?wd=");
+	strcat(result, wd);
+	strcat(result, "&pn=");
+	strcat(result, pn);
+	return result;
+}
+
+void process(cspider_t *cspider, char *d, char *url, void *user_data) {
+	int i;
+	for(i=0; i<spider_url_size; i++) {
+		free(spider_url[i]);
+	}
+	spider_url_size = 0;
+	for(i=0; i<spider_url_size; i++) {
+		free(spider_title[i]);
+	}
+	spider_title_size = 0;
+	spider_url_size   = xpath(d, "//div[@id='content_left']//h3/a/@href", spider_url, SPIDER_LENGTH);
+	spider_title_size = xpath(d, "//div[@id='content_left']//h3/a", spider_title, SPIDER_LENGTH);
+}
+
+void save(void *str, void *user_data) {
+	return;
 }
 
 static int xmp_mkdir(const char *path, mode_t mode)
 {
-	/*
-	int res;
+	char *buf = (char *)malloc((strlen(path)+1)*sizeof(char));
+	char *wd = (char *)malloc((strlen(path)+1)*sizeof(char));
+	strcpy(buf, path);
+	char delim[2] = "/";
+	char *p, *next;
+	p = strtok(buf, delim);
 
-	res = mkdir(path, mode);
-	if (res == -1)
-		return -errno;
-	*/
+	struct d_inode *cur_node = rootDir;
 	struct list_node* n;
-
-	if (strlen(path + 1) > MAX_NAMELEN)
-		return -ENAMETOOLONG;
-
-	list_for_each (n, &rootDir->file_entries) {
-		struct f_inode* o = list_entry(n, struct f_inode, node);
-		if (strcmp(path + 1, o->name) == 0)
-			return -EEXIST;
+	strcpy(wd, p);
+	while((next = strtok(NULL, delim))) {
+		int exist = 0;
+		list_for_each (n, &cur_node->dir_entries) {
+			struct d_inode* o = list_entry(n, struct d_inode, node);
+			if(strcmp(o->name, p) == 0) {
+				cur_node = o;
+				exist = 1;
+				break;
+			}
+		}
+		if(exist == 0) {
+			free(buf);
+			return -ENOENT;
+		}
+		p = next;
+		strcat(wd, "+");
+		strcat(wd, p);
 	}
 
-	list_for_each (n, &rootDir->dir_entries) {
-		struct d_inode* o = list_entry(n, struct d_inode, node);
-		if (strcmp(path + 1, o->name) == 0)
+	if (strlen(p) > MAX_NAMELEN) {
+		free(buf);
+		return -ENAMETOOLONG;
+	}
+
+	list_for_each (n, &cur_node->file_entries) {
+		struct f_inode* o = list_entry(n, struct f_inode, node);
+		if (strcmp(p, o->name) == 0) {
+			free(buf);
 			return -EEXIST;
+		}
+	}
+
+	list_for_each (n, &cur_node->dir_entries) {
+		struct d_inode* o = list_entry(n, struct d_inode, node);
+		if (strcmp(p, o->name) == 0) {
+			free(buf);
+			return -EEXIST;
+		}
 	}
 
 	struct d_inode* d_o = (struct d_inode *)malloc(sizeof(struct d_inode));
-	strcpy(d_o->name, path + 1); /* skip leading '/' */
-	d_o->mode = mode | S_IFDIR | 0755;
+	strcpy(d_o->name, p); /* skip leading '/' */
+	d_o->mode = mode | 0755 | S_IFDIR;
 	d_o->count = 0;
 	list_init(&d_o->file_entries);
 	list_init(&d_o->dir_entries);
-	list_add_prev(&d_o->node, &rootDir->dir_entries);
+	list_add_prev(&d_o->node, &cur_node->dir_entries);
+
+	// Initialize CSpider
+	cspider_t *spider = init_cspider();
+	char *agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.10; rv:42.0) Gecko/20100101 Firefox/42.0";
+	char *pn = "00";
+	char *url = join_with_base(wd, pn);
+	cs_setopt_url(spider, url);
+	cs_setopt_useragent(spider, agent);
+	cs_setopt_process(spider, process, NULL);
+	cs_setopt_save(spider, save, NULL);
+	cs_setopt_threadnum(spider, 5);
+	cs_run(spider);
+	struct f_inode *f_o = (struct f_inode *)malloc(sizeof(struct f_inode));
+	strcpy(f_o->name, "00"); /* skip leading '/' */
+	int i=0;
+	int content_size = 0;
+	for(i=0; i<spider_title_size; i++) {
+		content_size += strlen(spider_title[i]) + strlen("\n");
+		content_size += strlen(spider_url[i]) + strlen("\n");
+	}
+	char *contents = (char *)malloc(content_size + 1);
+	strcpy(contents, spider_title[0]);
+	strcat(contents, "\n");
+	strcat(contents, spider_url[0]);
+	strcat(contents, "\n");
+	for(i=1; i<spider_title_size; i++) {
+		strcat(contents, spider_title[i]);
+		strcat(contents, "\n");
+		strcat(contents, spider_url[i]);
+		strcat(contents, "\n");
+	}
+	f_o->size = strlen(contents);
+	f_o->contents = contents;
+	f_o->mode = S_IFREG | 0644;
+	f_o->ref = 1;
+	list_add_prev(&f_o->node, &d_o->file_entries);
+
+	free(buf);
 	return 0;
 }
 
 static int xmp_unlink(const char *path)
 {
-	/*
-	int res;
+	char *buf = (char *)malloc((strlen(path)+1)*sizeof(char));
+	strcpy(buf, path);
+	char delim[2] = "/";
+	char *last, *next;
+	last = strtok(buf, delim);
 
-	res = unlink(path);
-	if (res == -1)
-		return -errno;
-
-	return 0;
-	*/
+	struct d_inode *cur_node = rootDir;
 	struct list_node *n, *p;
+	while((next = strtok(NULL, delim))) {
+		int exist = 0;
+		list_for_each (n, &cur_node->dir_entries) {
+			struct d_inode* o = list_entry(n, struct d_inode, node);
+			if(strcmp(o->name, last) == 0) {
+				cur_node = o;
+				exist = 1;
+				break;
+			}
+		}
+		if(exist == 0) {
+			free(buf);
+			return -ENOENT;
+		}
+		last = next;
+	}
 
-	list_for_each_safe (n, p, &rootDir->file_entries) {
+	list_for_each_safe (n, p, &cur_node->file_entries) {
 		struct f_inode* o = list_entry(n, struct f_inode, node);
-		if (strcmp(path + 1, o->name) == 0) {
+		if (strcmp(last, o->name) == 0) {
 			__list_del(n);
 			free(o);
+			free(buf);
 			return 0;
 		}
 	}
-
+	free(buf);
 	return -ENOENT;
 }
 
@@ -386,173 +418,169 @@ static void free_dir_node(struct d_inode *d_node) {
 
 static int xmp_rmdir(const char *path)
 {
-	/*
-	int res;
+	char *buf = (char *)malloc((strlen(path)+1)*sizeof(char));
+	strcpy(buf, path);
+	char delim[2] = "/";
+	char *last, *next;
+	last = strtok(buf, delim);
 
-	res = rmdir(path);
-	if (res == -1)
-		return -errno;
-	*/
+	struct d_inode *cur_node = rootDir;
+	struct list_node *n, *p;
+	while((next = strtok(NULL, delim))) {
+		int exist = 0;
+		list_for_each (n, &cur_node->dir_entries) {
+			struct d_inode* o = list_entry(n, struct d_inode, node);
+			if(strcmp(o->name, last) == 0) {
+				cur_node = o;
+				exist = 1;
+				break;
+			}
+		}
+		if(exist == 0) {
+			free(buf);
+			return -ENOENT;
+		}
+		last = next;
+	}
 
-	struct list_node *n, *p;;
-	list_for_each_safe (n, p, &rootDir->dir_entries) {
+	list_for_each_safe (n, p, &cur_node->dir_entries) {
 		struct d_inode* o = list_entry(n, struct d_inode, node);
-		if (strcmp(path + 1, o->name) == 0) {
+		if (strcmp(last, o->name) == 0) {
 			__list_del(n);
 			free_dir_node(o);
 			return 0;
 		}
 	}
-
 	return 0;
 }
-
-static int xmp_symlink(const char *from, const char *to)
-{
-	int res;
-
-	res = symlink(from, to);
-	if (res == -1)
-		return -errno;
-
-	return 0;
-}
-
-static int xmp_rename(const char *from, const char *to, unsigned int flags)
-{
-	int res;
-
-	if (flags)
-		return -EINVAL;
-
-	res = rename(from, to);
-	if (res == -1)
-		return -errno;
-
-	return 0;
-}
-
-static int xmp_link(const char *from, const char *to)
-{
-	int res;
-
-	res = link(from, to);
-	if (res == -1)
-		return -errno;
-
-	return 0;
-}
-
-static int xmp_chmod(const char *path, mode_t mode,
-		     struct fuse_file_info *fi)
-{
-	(void) fi;
-	int res;
-
-	res = chmod(path, mode);
-	if (res == -1)
-		return -errno;
-
-	return 0;
-}
-
-static int xmp_chown(const char *path, uid_t uid, gid_t gid,
-		     struct fuse_file_info *fi)
-{
-	(void) fi;
-	int res;
-
-	res = lchown(path, uid, gid);
-	if (res == -1)
-		return -errno;
-
-	return 0;
-}
-
-static int xmp_truncate(const char *path, off_t size,
-			struct fuse_file_info *fi)
-{
-	int res;
-
-	if (fi != NULL)
-		res = ftruncate(fi->fh, size);
-	else
-		res = truncate(path, size);
-	if (res == -1)
-		return -errno;
-
-	return 0;
-}
-
-#ifdef HAVE_UTIMENSAT
-static int xmp_utimens(const char *path, const struct timespec ts[2],
-		       struct fuse_file_info *fi)
-{
-	(void) fi;
-	int res;
-
-	/* don't use utime/utimes since they follow symlinks */
-	res = utimensat(0, path, ts, AT_SYMLINK_NOFOLLOW);
-	if (res == -1)
-		return -errno;
-
-	return 0;
-}
-#endif
 
 static int xmp_create(const char *path, mode_t mode,
 		      struct fuse_file_info *fi)
 {
-	/*
-    int res;
+	char *buf = (char *)malloc((strlen(path)+1)*sizeof(char));
+	char *wd = (char *)malloc((strlen(path)+1)*sizeof(char));
+	strcpy(buf, path);
+	char delim[2] = "/";
+	char *last, *next;
+	last = strtok(buf, delim);
+	struct d_inode *cur_node = rootDir;
+	struct list_node *n;
+	int init = 0;
+	while((next = strtok(NULL, delim))) {
+		if(init == 0) {
+			strcpy(wd, last);
+			init = 1;
+		} else {
+			strcat(wd, "+");
+			strcat(wd, last);
+		}
+		int exist = 0;
+		list_for_each (n, &cur_node->dir_entries) {
+			struct d_inode* o = list_entry(n, struct d_inode, node);
+			if(strcmp(o->name, last) == 0) {
+				cur_node = o;
+				exist = 1;
+				break;
+			}
+		}
+		if(exist == 0) {
+			free(buf);
+			return -ENOENT;
+		}
+		last = next;
+	}
 
-	res = open(path, fi->flags, mode);
-	if (res == -1)
-		return -errno;
-
-	fi->fh = res;
-	return 0;
-	*/
-
-	struct f_inode* o;
-	struct list_node* n;
-
-	if (strlen(path + 1) > MAX_NAMELEN)
+	if (strlen(last) > MAX_NAMELEN)
 		return -ENAMETOOLONG;
 
-	list_for_each (n, &rootDir->file_entries) {
-		o = list_entry(n, struct f_inode, node);
-		if (strcmp(path + 1, o->name) == 0)
+	list_for_each (n, &cur_node->file_entries) {
+		struct f_inode *o = list_entry(n, struct f_inode, node);
+		if (strcmp(last, o->name) == 0)
 			return -EEXIST;
 	}
 
-	o = (struct f_inode *)malloc(sizeof(struct f_inode));
-	strcpy(o->name, path + 1); /* skip leading '/' */
+	list_for_each (n, &cur_node->dir_entries) {
+		struct d_inode *o = list_entry(n, struct d_inode, node);
+		if (strcmp(last, o->name) == 0)
+			return -EEXIST;
+	}
+
+	struct f_inode *o = (struct f_inode *)malloc(sizeof(struct f_inode));
+	strcpy(o->name, last);
+	o->size = 0;
+	o->ref = 1;
 	o->mode = mode | S_IFREG | 0644;
-	list_add_prev(&o->node, &rootDir->file_entries);
+	if(init == 1) {
+		cspider_t *spider = init_cspider();
+		char *agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.10; rv:42.0) Gecko/20100101 Firefox/42.0";
+		char *url = join_with_base(wd, last);
+		cs_setopt_url(spider, url);
+		cs_setopt_useragent(spider, agent);
+		cs_setopt_process(spider, process, NULL);
+		cs_setopt_save(spider, save, NULL);
+		cs_setopt_threadnum(spider, 5);
+		cs_run(spider);
+		int i=0;
+		int content_size = 0;
+		for(i=0; i<spider_title_size; i++) {
+			content_size += strlen(spider_title[i]) + strlen("\n");
+			content_size += strlen(spider_url[i]) + strlen("\n");
+		}
+		char *contents = (char *)malloc(content_size + 1);
+		strcpy(contents, spider_title[0]);
+		strcat(contents, "\n");
+		strcat(contents, spider_url[0]);
+		strcat(contents, "\n");
+		for(i=1; i<spider_title_size; i++) {
+			strcat(contents, spider_title[i]);
+			strcat(contents, "\n");
+			strcat(contents, spider_url[i]);
+			strcat(contents, "\n");
+		}
+		o->contents = contents;
+		o->size = strlen(contents);
+	}
+	list_add_prev(&o->node, &cur_node->file_entries);
 
 	return 0;
 }
 
 static int xmp_open(const char *path, struct fuse_file_info *fi)
 {
-	/*
-	int res;
+	char *buf = (char *)malloc((strlen(path)+1)*sizeof(char));
+	strcpy(buf, path);
+	char delim[2] = "/";
+	char *last, *next;
+	last = strtok(buf, delim);
 
-	res = open(path, fi->flags);
-	if (res == -1)
-		return -errno;
-
-	fi->fh = res;
-	return 0;
-	*/
-	/*
-	(void) fi;
-	struct f_inode *o = (struct f_inode *)malloc(sizeof(struct f_inode *));
-	if(get_f_inode(path, o) == 1)
-		return 0;
-	return -ENOENT;
-	*/
+	struct d_inode *cur_node = rootDir;
+	struct list_node *n;
+	while((next = strtok(NULL, delim))) {
+		int exist = 0;
+		list_for_each (n, &cur_node->dir_entries) {
+			struct d_inode* o = list_entry(n, struct d_inode, node);
+			if(strcmp(o->name, last) == 0) {
+				cur_node = o;
+				exist = 1;
+				break;
+			}
+		}
+		if(exist == 0) {
+			free(buf);
+			return -ENOENT;
+		}
+		last = next;
+	}
+	int exist = 0;
+	list_for_each (n, &cur_node->file_entries) {
+		struct f_inode *o = list_entry(n, struct f_inode, node);
+		if (strcmp(last, o->name) == 0) {
+			exist = 1;
+			break;
+		}
+	}
+	if(exist == 0)
+		return -ENOENT;
 	return 0;
 
 }
@@ -560,237 +588,128 @@ static int xmp_open(const char *path, struct fuse_file_info *fi)
 static int xmp_read(const char *path, char *buf, size_t size, off_t offset,
 		    struct fuse_file_info *fi)
 {
-	/*
-	int fd;
-	int res;
+	char *mpath = (char *)malloc((strlen(path)+1)*sizeof(char));
+	strcpy(mpath, path);
+	char delim[2] = "/";
+	char *last, *next;
+	last = strtok(mpath, delim);
 
-	if(fi == NULL)
-		fd = open(path, O_RDONLY);
-	else
-		fd = fi->fh;
-	
-	if (fd == -1)
-		return -errno;
+	struct d_inode *cur_node = rootDir;
+	struct list_node *n;
+	while((next = strtok(NULL, delim))) {
+		int exist = 0;
+		list_for_each (n, &cur_node->dir_entries) {
+			struct d_inode* o = list_entry(n, struct d_inode, node);
+			if(strcmp(o->name, last) == 0) {
+				cur_node = o;
+				exist = 1;
+				break;
+			}
+		}
+		if(exist == 0) {
+			free(mpath);
+			return -ENOENT;
+		}
+		last = next;
+	}
 
-	res = pread(fd, buf, size, offset);
-	if (res == -1)
-		res = -errno;
-
-	if(fi == NULL)
-		close(fd);
-
-	return res;
-	*/
-	(void) fi;
-	struct f_inode* o;
-	struct list_node* n;
 	int exist = 0;
-	list_for_each (n, &rootDir->file_entries) {
-		o = list_entry(n, struct f_inode, node);
-		if (strcmp(path + 1, o->name) == 0) {
+	struct f_inode *target_node;
+	list_for_each (n, &cur_node->file_entries) {
+		struct f_inode* o = list_entry(n, struct f_inode, node);
+		if (strcmp(last, o->name) == 0) {
+			target_node = o;
 			exist = 1;
+			break;
 		}
 	}
-	if(exist == 0)
+	if(exist == 0) {
+		free(mpath);
 		return -ENOENT;
+	}
 
-	if (offset < o->size) {
-		if (offset + size > o->size)
-			size = o->size - offset;
-		memcpy(buf, o->contents + offset, size);
+	if (offset < target_node->size) {
+		if (offset + size > target_node->size)
+			size = target_node->size - offset;
+		memcpy(buf, target_node->contents + offset, size);
 	} else
 		size = 0;
-
 	return size;
-
 }
 
 static int xmp_write(const char *path, const char *buf, size_t size,
 		     off_t offset, struct fuse_file_info *fi)
 {
-	/*
-	int fd;
-	int res;
+	char *mpath = (char *)malloc((strlen(path)+1)*sizeof(char));
+	strcpy(mpath, path);
+	char delim[2] = "/";
+	char *last, *next;
+	last = strtok(mpath, delim);
 
-	(void) fi;
-	if(fi == NULL)
-		fd = open(path, O_WRONLY);
-	else
-		fd = fi->fh;
-	
-	if (fd == -1)
-		return -errno;
+	struct d_inode *cur_node = rootDir;
+	struct list_node *n;
+	while((next = strtok(NULL, delim))) {
+		int exist = 0;
+		list_for_each (n, &cur_node->dir_entries) {
+			struct d_inode* o = list_entry(n, struct d_inode, node);
+			if(strcmp(o->name, last) == 0) {
+				cur_node = o;
+				exist = 1;
+				break;
+			}
+		}
+		if(exist == 0) {
+			free(mpath);
+			return -ENOENT;
+		}
+		last = next;
+	}
 
-	res = pwrite(fd, buf, size, offset);
-	if (res == -1)
-		res = -errno;
-
-	if(fi == NULL)
-		close(fd);
-	return res;
-	*/
-
-	(void) fi;
-	struct f_inode* o;
-	struct list_node* n;
 	int exist = 0;
-	list_for_each (n, &rootDir->file_entries) {
-		o = list_entry(n, struct f_inode, node);
-		if (strcmp(path + 1, o->name) == 0) {
+	struct f_inode *target_node;
+	list_for_each (n, &cur_node->file_entries) {
+		struct f_inode* o = list_entry(n, struct f_inode, node);
+		if (strcmp(last, o->name) == 0) {
+			target_node = o;
 			exist = 1;
+			break;
 		}
 	}
-	if(exist == 0)
+	if(exist == 0) {
+		free(mpath);
 		return -ENOENT;
+	}
 
 	size_t new_size = offset + size;
-	if (new_size > o->size) {
+	if (new_size > target_node->size) {
 		void *new_buf;
 
-		new_buf = realloc(o->contents, new_size);
+		new_buf = realloc(target_node->contents, new_size);
 		if (!new_buf && new_size)
 			return -ENOMEM;
 
-		if (new_size > o->size)
-			memset(new_buf + o->size, 0, new_size - o->size);
+		if (new_size > target_node->size)
+			memset(new_buf + target_node->size, 0, new_size - target_node->size);
 
-		o->contents = new_buf;
-		o->size = new_size;
+		target_node->contents = new_buf;
+		target_node->size = new_size;
 	}
-	memcpy(o->contents + offset, buf, size);
+	memcpy(target_node->contents + offset, buf, size);
 
 	return size;
 }
 
-static int xmp_statfs(const char *path, struct statvfs *stbuf)
-{
-	int res;
-
-	res = statvfs(path, stbuf);
-	if (res == -1)
-		return -errno;
-
-	return 0;
-}
-
-static int xmp_release(const char *path, struct fuse_file_info *fi)
-{
-	(void) path;
-	close(fi->fh);
-	return 0;
-}
-
-static int xmp_fsync(const char *path, int isdatasync,
-		     struct fuse_file_info *fi)
-{
-	/* Just a stub.	 This method is optional and can safely be left
-	   unimplemented */
-
-	(void) path;
-	(void) isdatasync;
-	(void) fi;
-	return 0;
-}
-
-#ifdef HAVE_POSIX_FALLOCATE
-static int xmp_fallocate(const char *path, int mode,
-			off_t offset, off_t length, struct fuse_file_info *fi)
-{
-	int fd;
-	int res;
-
-	(void) fi;
-
-	if (mode)
-		return -EOPNOTSUPP;
-
-	if(fi == NULL)
-		fd = open(path, O_WRONLY);
-	else
-		fd = fi->fh;
-	
-	if (fd == -1)
-		return -errno;
-
-	res = -posix_fallocate(fd, offset, length);
-
-	if(fi == NULL)
-		close(fd);
-	return res;
-}
-#endif
-
-#ifdef HAVE_SETXATTR
-/* xattr operations are optional and can safely be left unimplemented */
-static int xmp_setxattr(const char *path, const char *name, const char *value,
-			size_t size, int flags)
-{
-	int res = lsetxattr(path, name, value, size, flags);
-	if (res == -1)
-		return -errno;
-	return 0;
-}
-
-static int xmp_getxattr(const char *path, const char *name, char *value,
-			size_t size)
-{
-	int res = lgetxattr(path, name, value, size);
-	if (res == -1)
-		return -errno;
-	return res;
-}
-
-static int xmp_listxattr(const char *path, char *list, size_t size)
-{
-	int res = llistxattr(path, list, size);
-	if (res == -1)
-		return -errno;
-	return res;
-}
-
-static int xmp_removexattr(const char *path, const char *name)
-{
-	int res = lremovexattr(path, name);
-	if (res == -1)
-		return -errno;
-	return 0;
-}
-#endif /* HAVE_SETXATTR */
-
 static struct fuse_operations xmp_oper = {
-	.init           = xmp_init,
+	.init       = xmp_init,
 	.getattr	= xmp_getattr,
-	.access		= xmp_access,
-	.readlink	= xmp_readlink,
 	.readdir	= xmp_readdir,
 	.mkdir		= xmp_mkdir,
-	.symlink	= xmp_symlink,
 	.unlink		= xmp_unlink,
 	.rmdir		= xmp_rmdir,
-	.rename		= xmp_rename,
-	.link		= xmp_link,
-	.chmod		= xmp_chmod,
-	.chown		= xmp_chown,
-	.truncate	= xmp_truncate,
-#ifdef HAVE_UTIMENSAT
-	.utimens	= xmp_utimens,
-#endif
-	.open		= xmp_open,
 	.create 	= xmp_create,
+	.open       = xmp_open,
 	.read		= xmp_read,
 	.write		= xmp_write,
-	.statfs		= xmp_statfs,
-	.release	= xmp_release,
-	.fsync		= xmp_fsync,
-#ifdef HAVE_POSIX_FALLOCATE
-	.fallocate	= xmp_fallocate,
-#endif
-#ifdef HAVE_SETXATTR
-	.setxattr	= xmp_setxattr,
-	.getxattr	= xmp_getxattr,
-	.listxattr	= xmp_listxattr,
-	.removexattr	= xmp_removexattr,
-#endif
 };
 
 int main(int argc, char *argv[])
