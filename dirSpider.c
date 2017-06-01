@@ -376,12 +376,6 @@ static int xmp_mkdir(const char *path, mode_t mode)
 	return 0;
 }
 
-static void free_file_node(struct f_inode *f_node) {
-	free(f_node->name);
-	free(f_node->contents);
-	free(f_node);
-}
-
 static int xmp_unlink(const char *path)
 {
 	char *name;
@@ -398,12 +392,12 @@ static int xmp_unlink(const char *path)
 				struct f_inode* p_o = list_entry(o->p_node, struct f_inode, node);
 				p_o->nlink--;
 				if(p_o->nlink == 0)
-					free_file_node(p_o);
-				free_file_node(o);
+					free(p_o);
+				free(o);
 			} else {
 				o->nlink--;
 				if(o->nlink == 0)
-					free_file_node(o);
+					free(o);
 			}
 			free(name);
 			return 0;
