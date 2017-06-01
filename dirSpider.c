@@ -61,6 +61,7 @@ struct d_inode {
 	struct list_node file_entries;
 	struct list_node dir_entries;
 	struct list_node node;
+	char *link_path;
 };
 
 struct f_inode {
@@ -73,6 +74,7 @@ struct f_inode {
     mode_t mode;
     struct list_node node;
     struct list_node* p_node;
+    char *link_path;
 };
 
 static struct d_inode *rootDir;
@@ -82,6 +84,9 @@ static void *xmp_init(struct fuse_conn_info *conn,
 {
 	(void) conn;
 	cfg->use_ino = 1;
+	cfg->kernel_cache = 1;
+	cfg->hard_remove = 1;
+	cfg->direct_io = 1;
 
 	return NULL;
 }
@@ -154,6 +159,12 @@ static int xmp_getattr(const char *path, struct stat *st,
 		struct d_inode* d_o = list_entry(n, struct d_inode, node);
 		if(strcmp(d_o->name, name) == 0) {
 			st->st_mode = d_o->mode;
+			if((d_o->mode & S_IFLNK) == S_IFLNK) {
+				st->st_nlink = 1;
+				st->st_size = 1;
+				free(name);
+				return 0;
+			}
 			st->st_nlink = 2;
 			st->st_size = 0;
 			list_for_each (n, &d_o->file_entries) {
@@ -175,8 +186,13 @@ static int xmp_getattr(const char *path, struct stat *st,
 		if(strcmp(f_o->name, name) == 0) {
 			if(f_o->p_node != NULL)
 				f_o = list_entry(f_o->p_node, struct f_inode, node);
-
 			st->st_mode = f_o->mode;
+			if((f_o->mode & S_IFLNK) == S_IFLNK) {
+				st->st_nlink = 1;
+				st->st_size = 1;
+				free(name);
+				return 0;
+			}
 			st->st_nlink = f_o->nlink;
 			st->st_size = f_o->size;
 			free(name);
@@ -313,7 +329,7 @@ static int xmp_mkdir(const char *path, mode_t mode)
 	list_init(&d_o->dir_entries);
 	list_add_prev(&d_o->node, &ptdir_inode->dir_entries);
 
-
+	/*
 	char *wd  = (char *)malloc((strlen(path)+1)*sizeof(char));
 	char *buf = (char *)malloc((strlen(path)+1)*sizeof(char));
 	strcpy(buf, path);
@@ -372,7 +388,7 @@ static int xmp_mkdir(const char *path, mode_t mode)
 	}
 
 	list_add_prev(&f_o->node, &d_o->file_entries);
-
+	*/
 	return 0;
 }
 
@@ -470,7 +486,7 @@ static int xmp_create(const char *path, mode_t mode,
 	f_o->size = 0;
 	f_o->mode = mode | S_IFREG | 0644;
 	f_o->nlink = 1;
-
+	/*
 	if(ptdir_inode != rootDir) {
 		char *wd  = (char *)malloc((strlen(path)+1)*sizeof(char));
 		char *buf = (char *)malloc((strlen(path)+1)*sizeof(char));
@@ -516,7 +532,7 @@ static int xmp_create(const char *path, mode_t mode,
 		f_o->contents = contents;
 		f_o->size = strlen(contents);
 	}
-
+	*/
 	list_add_prev(&f_o->node, &ptdir_inode->file_entries);
 	free(name);
 	return 0;
@@ -524,7 +540,6 @@ static int xmp_create(const char *path, mode_t mode,
 
 static int xmp_open(const char *path, struct fuse_file_info *fi)
 {
-	/*
 	char *name;
 	struct d_inode *ptdir_inode;
 	if(get_parent_inode(path, &ptdir_inode, &name) || name == NULL || ptdir_inode == NULL)
@@ -540,7 +555,7 @@ static int xmp_open(const char *path, struct fuse_file_info *fi)
 	}
 	free(name);
 	return -ENOENT;
-	*/
+
 	return 0;
 }
 
@@ -633,6 +648,11 @@ static int xmp_rename (const char *from, const char *to, unsigned int flags) {
 		return -ENOENT;
 	}
 
+	if (strlen(to_name) > MAX_NAMELEN) {
+		free(to_name);
+		return -ENAMETOOLONG;
+	}
+
 	struct list_node *n;
 	list_for_each (n, &to_ptdir_inode->file_entries) {
 		struct f_inode *o = list_entry(n, struct f_inode, node);
@@ -703,16 +723,7 @@ static int xmp_rename (const char *from, const char *to, unsigned int flags) {
 	free(to_name);
 	return -EINVAL;
 }
-/*
-//ToDo:获取符号链接所指向的位置
-static int xmp_readlink (const char *path, char *buf, size_t size) {
 
-}
-
-static int xmp_symlink (const char *from, const char *to) {
-
-}
-*/
 static int xmp_link (const char *from, const char *to) {
 	char *fr_name;
 	struct d_inode *fr_ptdir_inode;
@@ -724,6 +735,11 @@ static int xmp_link (const char *from, const char *to) {
 	if(get_parent_inode(to, &to_ptdir_inode, &to_name) || to_name == NULL || to_ptdir_inode == NULL) {
 		free(fr_name);
 		return -ENOENT;
+	}
+
+	if (strlen(to_name) > MAX_NAMELEN) {
+		free(to_name);
+		return -ENAMETOOLONG;
 	}
 
 	struct list_node *n;
@@ -788,6 +804,139 @@ static int xmp_link (const char *from, const char *to) {
 	free(to_name);
 	return -EINVAL;
 }
+
+static size_t min(size_t a, size_t b) {
+	return a > b ? b : a;
+}
+
+static int xmp_readlink (const char *path, char *buf, size_t size) {
+	char *name;
+	struct d_inode *ptdir_inode;
+	if(get_parent_inode(path, &ptdir_inode, &name) || name == NULL || ptdir_inode == NULL)
+		return -errno;
+	struct list_node *n;
+	list_for_each (n, &ptdir_inode->file_entries) {
+		struct f_inode *o = list_entry(n, struct f_inode, node);
+		if (strcmp(name, o->name) == 0) {
+			if(o->link_path != NULL) {
+				size_t m_size = min(strlen(o->link_path), size-1);
+				memcpy(buf, o->link_path, m_size);
+				buf[m_size] = '\0';
+				return 0;
+			}
+		}
+	}
+	list_for_each (n, &ptdir_inode->dir_entries) {
+		struct d_inode *o = list_entry(n, struct d_inode, node);
+		if (strcmp(name, o->name) == 0) {
+			if(o->link_path != NULL) {
+				size_t m_size = min(strlen(o->link_path), size-1);
+				memcpy(buf, o->link_path, m_size);
+				buf[m_size] = '\0';
+				return 0;
+			}
+		}
+	}
+	return 0;
+}
+
+static int xmp_symlink (const char *from, const char *to) {
+	char *fr_name;
+	struct d_inode *fr_ptdir_inode;
+	if(get_parent_inode(from, &fr_ptdir_inode, &fr_name) || fr_name == NULL || fr_ptdir_inode == NULL)
+		return -ENOENT;
+
+	char *to_name;
+	struct d_inode *to_ptdir_inode;
+	if(get_parent_inode(to, &to_ptdir_inode, &to_name) || to_name == NULL || to_ptdir_inode == NULL) {
+		free(fr_name);
+		return -ENOENT;
+	}
+
+	if (strlen(to_name) > MAX_NAMELEN) {
+		free(to_name);
+		return -ENAMETOOLONG;
+	}
+
+	struct list_node *n;
+	list_for_each (n, &to_ptdir_inode->file_entries) {
+		struct f_inode *o = list_entry(n, struct f_inode, node);
+		if (strcmp(to_name, o->name) == 0) {
+			free(fr_name);
+			free(to_name);
+			return -EEXIST;
+		}
+	}
+
+	list_for_each (n, &to_ptdir_inode->dir_entries) {
+		struct d_inode *o = list_entry(n, struct d_inode, node);
+		if (strcmp(to_name, o->name) == 0) {
+			free(fr_name);
+			free(to_name);
+			return -EEXIST;
+		}
+	}
+
+	int filetype = -1;
+	struct list_node *target_node;
+	list_for_each (n, &fr_ptdir_inode->dir_entries) {
+		struct d_inode* o = list_entry(n, struct d_inode, node);
+		if (strcmp(fr_name, o->name) == 0) {
+			filetype = 0;
+			target_node = n;
+			break;
+		}
+	}
+	list_for_each (n, &fr_ptdir_inode->file_entries) {
+		struct f_inode* o = list_entry(n, struct f_inode, node);
+		if (strcmp(fr_name, o->name) == 0) {
+			filetype = 1;
+			target_node = n;
+			break;
+		}
+	}
+	free(fr_name);
+	if(target_node == NULL) {
+		free(to_name);
+		return -ENOENT;
+	}
+
+	switch(filetype) {
+		case 1: {
+			struct f_inode *f_o = (struct f_inode *)malloc(sizeof(struct f_inode));
+			strcpy(f_o->name, to_name);
+			char *f_o_path = (char *)malloc(strlen(from) + 1);
+			strcpy(f_o_path, from);
+			f_o->link_path = f_o_path;
+			f_o->mode = S_IFLNK | 0777;
+			f_o->nlink = 1;
+			f_o->size = 0;
+			free(to_name);
+			list_add_prev(&f_o->node, &to_ptdir_inode->file_entries);
+			return 0;
+			break;
+		}
+		case 0: {
+			struct d_inode *d_o = (struct d_inode *)malloc(sizeof(struct d_inode));
+			strcpy(d_o->name, to_name);
+			char *d_o_path = (char *)malloc(strlen(from) + 1);
+			strcpy(d_o_path, from);
+			d_o->link_path = d_o_path;
+			d_o->mode = S_IFLNK | 0777;
+			free(to_name);
+			list_add_prev(&d_o->node, &to_ptdir_inode->dir_entries);
+			return 0;
+			break;
+		}
+		case -1:
+			break;
+		default:
+			break;
+	}
+	free(to_name);
+	return -EINVAL;
+}
+
 /*
 static int xmp_chmod (const char *path, mode_t mode, struct fuse_file_info *fi) {
 
@@ -854,23 +1003,32 @@ static int xmp_write_buf (const char *, struct fuse_bufvec *buf, off_t off,
 */
 static struct fuse_operations xmp_oper = {
 	.init       = xmp_init,
+	//ls
 	.getattr	= xmp_getattr,
+	//mv
 	.rename     = xmp_rename,
+
 //	.opendir    = xmp_opendir,
+
+	//cd mkdir rmdir
 	.readdir	= xmp_readdir,
 	.mkdir		= xmp_mkdir,
 	.rmdir		= xmp_rmdir,
+	//vi rm(file)
 	.create 	= xmp_create,
 	.open       = xmp_open,
 	.read		= xmp_read,
 	.write		= xmp_write,
 	.unlink		= xmp_unlink,
+	//hard link
+	.link       = xmp_link,
+
+	//soft link
+	.symlink    = xmp_symlink,
+	.readlink   = xmp_readlink,
 
 //	.statfs     = xmp_statfs,
 //	.release    = xmp_release,
-//	.readlink   = xmp_readlink,
-//	.symlink    = xmp_symlink,
-	.link       = xmp_link,
 //	.chmod      = xmp_chmod,
 //	.chown      = xmp_chown,
 //	.truncate   = xmp_truncate,
