@@ -55,8 +55,8 @@
 typedef unsigned int uint32_t;
 struct d_inode {
 	char name[MAX_NAMELEN + 1];
-	__uid_t st_uid;		/* User ID of the file's owner.	*/
-	__gid_t st_gid;		/* Group ID of the file's group.*/
+	__uid_t uid;		/* User ID of the file's owner.	*/
+	__gid_t gid;		/* Group ID of the file's group.*/
 	mode_t mode;
 	struct list_node file_entries;
 	struct list_node dir_entries;
@@ -68,8 +68,8 @@ struct f_inode {
 	char name[MAX_NAMELEN + 1];
 	void* contents;
 	__nlink_t nlink;
-	__uid_t st_uid;		/* User ID of the file's owner.	*/
-	__gid_t st_gid;		/* Group ID of the file's group.*/
+	__uid_t uid;		/* User ID of the file's owner.	*/
+	__gid_t gid;		/* Group ID of the file's group.*/
 	size_t size;
     mode_t mode;
     struct list_node node;
@@ -159,6 +159,8 @@ static int xmp_getattr(const char *path, struct stat *st,
 		struct d_inode* d_o = list_entry(n, struct d_inode, node);
 		if(strcmp(d_o->name, name) == 0) {
 			st->st_mode = d_o->mode;
+			st->st_uid = d_o->uid;
+			st->st_gid = d_o->gid;
 			if((d_o->mode & S_IFLNK) == S_IFLNK) {
 				st->st_nlink = 1;
 				st->st_size = 1;
@@ -184,6 +186,8 @@ static int xmp_getattr(const char *path, struct stat *st,
 	list_for_each (n, &ptdir_inode->file_entries) {
 		struct f_inode* f_o = list_entry(n, struct f_inode, node);
 		if(strcmp(f_o->name, name) == 0) {
+			st->st_uid = f_o->uid;
+			st->st_gid = f_o->gid;
 			if(f_o->p_node != NULL)
 				f_o = list_entry(f_o->p_node, struct f_inode, node);
 			st->st_mode = f_o->mode;
@@ -329,7 +333,7 @@ static int xmp_mkdir(const char *path, mode_t mode)
 	list_init(&d_o->dir_entries);
 	list_add_prev(&d_o->node, &ptdir_inode->dir_entries);
 
-	/*
+
 	char *wd  = (char *)malloc((strlen(path)+1)*sizeof(char));
 	char *buf = (char *)malloc((strlen(path)+1)*sizeof(char));
 	strcpy(buf, path);
@@ -388,7 +392,7 @@ static int xmp_mkdir(const char *path, mode_t mode)
 	}
 
 	list_add_prev(&f_o->node, &d_o->file_entries);
-	*/
+
 	return 0;
 }
 
@@ -486,7 +490,7 @@ static int xmp_create(const char *path, mode_t mode,
 	f_o->size = 0;
 	f_o->mode = mode | S_IFREG | 0644;
 	f_o->nlink = 1;
-	/*
+
 	if(ptdir_inode != rootDir) {
 		char *wd  = (char *)malloc((strlen(path)+1)*sizeof(char));
 		char *buf = (char *)malloc((strlen(path)+1)*sizeof(char));
@@ -532,7 +536,7 @@ static int xmp_create(const char *path, mode_t mode,
 		f_o->contents = contents;
 		f_o->size = strlen(contents);
 	}
-	*/
+
 	list_add_prev(&f_o->node, &ptdir_inode->file_entries);
 	free(name);
 	return 0;
@@ -937,109 +941,88 @@ static int xmp_symlink (const char *from, const char *to) {
 	return -EINVAL;
 }
 
-/*
+
 static int xmp_chmod (const char *path, mode_t mode, struct fuse_file_info *fi) {
+	char *name;
+	struct d_inode *ptdir_inode;
+	if(get_parent_inode(path, &ptdir_inode, &name) || name == NULL || ptdir_inode == NULL)
+		return -ENOENT;
+	struct list_node *n;
+	list_for_each (n, &ptdir_inode->file_entries) {
+		struct f_inode *o = list_entry(n, struct f_inode, node);
+		if (strcmp(name, o->name) == 0) {
+			o->mode = mode | S_IFREG;
+			return 0;
+		}
+	}
 
+	list_for_each (n, &ptdir_inode->dir_entries) {
+		struct d_inode *o = list_entry(n, struct d_inode, node);
+		if (strcmp(name, o->name) == 0) {
+			o->mode = mode | S_IFDIR;
+			return 0;
+		}
+	}
+	return -ENOENT;
 }
 
-static int xmp_chown (const char *, uid_t, gid_t, struct fuse_file_info *fi) {
 
+static int xmp_chown (const char *path, uid_t uid, gid_t gid, struct fuse_file_info *fi) {
+	char *name;
+	struct d_inode *ptdir_inode;
+	if(get_parent_inode(path, &ptdir_inode, &name) || name == NULL || ptdir_inode == NULL)
+		return -ENOENT;
+	struct list_node *n;
+	list_for_each (n, &ptdir_inode->file_entries) {
+		struct f_inode *o = list_entry(n, struct f_inode, node);
+		if (strcmp(name, o->name) == 0) {
+			o->uid = uid;
+			o->gid = gid;
+			return 0;
+		}
+	}
+
+	list_for_each (n, &ptdir_inode->dir_entries) {
+		struct d_inode *o = list_entry(n, struct d_inode, node);
+		if (strcmp(name, o->name) == 0) {
+			o->uid = uid;
+			o->gid = gid;
+			return 0;
+		}
+	}
+	return -ENOENT;
 }
 
-static int xmp_truncate (const char *path, off_t size, struct fuse_file_info *fi) {
-
+static void xmp_destroy (void * exit) {
+	free_dir_node(rootDir);
+	int i;
+	for(i=0; i<spider_url_size; i++) {
+		free(spider_url[i]);
+	}
+	for(i=0; i<spider_title_size; i++) {
+		free(spider_title[i]);
+	}
+	return;
 }
 
-static int xmp_statfs (const char *path, struct statvfs *stbuf) {
-
-}
-
-static int xmp_release(const char *path, struct fuse_file_info *fi)
-{
-
-}
-
-static int xmp_releasedir (const char *, struct fuse_file_info *) {
-
-}
-
-static int xmp_opendir (const char *, struct fuse_file_info *) {
-
-}
-
-static void xmp_destroy (void *) {
-
-}
-
-static int xmp_access (const char *path, int mask) {
-
-}
-
-#ifdef HAVE_UTIMENSAT
-static int xmp_utimens(const char *path, const struct timespec ts[2],
-		       struct fuse_file_info *fi)
-{
-	(void) fi;
-	int res;
-
-	//don't use utime/utimes since they follow symlinks
-	res = utimensat(0, path, ts, AT_SYMLINK_NOFOLLOW);
-	if (res == -1)
-		return -errno;
-
-	return 0;
-}
-#endif
-
-static int xmp_lock (const char *, struct fuse_file_info *, int cmd,
-		     struct flock *) {
-cd
-}
-
-static int xmp_write_buf (const char *, struct fuse_bufvec *buf, off_t off,
-			  struct fuse_file_info *) {
-
-}
-*/
 static struct fuse_operations xmp_oper = {
 	.init       = xmp_init,
-	//ls
 	.getattr	= xmp_getattr,
-	//mv
 	.rename     = xmp_rename,
-
-//	.opendir    = xmp_opendir,
-
-	//cd mkdir rmdir
 	.readdir	= xmp_readdir,
 	.mkdir		= xmp_mkdir,
 	.rmdir		= xmp_rmdir,
-	//vi rm(file)
 	.create 	= xmp_create,
 	.open       = xmp_open,
 	.read		= xmp_read,
 	.write		= xmp_write,
 	.unlink		= xmp_unlink,
-	//hard link
 	.link       = xmp_link,
-
-	//soft link
 	.symlink    = xmp_symlink,
 	.readlink   = xmp_readlink,
-
-//	.statfs     = xmp_statfs,
-//	.release    = xmp_release,
-//	.chmod      = xmp_chmod,
-//	.chown      = xmp_chown,
-//	.truncate   = xmp_truncate,
-
-//	.destroy    = xmp_destroy,
-//	.access     = xmp_access,
-#ifdef HAVE_UTIMENSAT
-//	.utimens	= xmp_utimens,
-#endif
-//	.lock       = xmp_lock,
-//	.releasedir = xmp_releasedir,
+	.chmod      = xmp_chmod,
+	.chown      = xmp_chown,
+	.destroy    = xmp_destroy,
 };
 
 int main(int argc, char *argv[])
